@@ -1,1 +1,121 @@
-﻿# append-yaml.yml sera collé ici
+﻿name: Append YAML to LEARN_LOG.yaml
+
+on:
+  workflow_dispatch:
+    inputs:
+      yaml_snippet_b64:
+        description: "Bloc YAML à ajouter (base64, UTF-8). Doit commencer par '- ' si liste."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  DEST_OWNER: minot-prod
+  DEST_REPO: Vincent-Ops-and-Reports
+  TARGET_PATH: telemetry/LEARN_LOG.yaml
+  LOCK_PATH: telemetry/LEARN_LOG.lock
+
+jobs:
+  append:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assert secrets
+        run: |
+          test -n "${{ secrets.SYNC_GH_TOKEN }}" || (echo "Missing SYNC_GH_TOKEN" && exit 1)
+          test -n "${{ secrets.SYNC_BOT_NAME }}" || (echo "Missing SYNC_BOT_NAME" && exit 1)
+          test -n "${{ secrets.SYNC_BOT_EMAIL }}" || (echo "Missing SYNC_BOT_EMAIL" && exit 1)
+
+      - name: Acquire lock (best effort)
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_GH_TOKEN }}
+        run: |
+          set -e
+          for i in $(seq 1 10); do
+            now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            content=$(printf "locked by %s on %s\n" "${{ github.run_id }}" "$now" | base64 -w0)
+            body=$(jq -n --arg message "lock LEARN_LOG by run ${{ github.run_id }}" \
+                           --arg content "$content" \
+                           --arg name "${{ secrets.SYNC_BOT_NAME }}" \
+                           --arg email "${{ secrets.SYNC_BOT_EMAIL }}" \
+                           '{message:$message, content:$content, branch:"main", committer:{name:$name,email:$email}}')
+            code=$(curl -s -o resp.json -w "%{http_code}" -X PUT \
+              -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+              -d "$body" \
+              "https://api.github.com/repos/${{ env.DEST_OWNER }}/${{ env.DEST_REPO }}/contents/${{ env.LOCK_PATH }}")
+            if [ "$code" = "201" ]; then
+              echo "lock_acquired=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "lock_acquired=false" >> $GITHUB_OUTPUT
+          echo "WARN: could not acquire lock, proceeding optimistically"
+
+      - name: Get current YAML
+        id: getyaml
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_GH_TOKEN }}
+        run: |
+          set -e
+          URL="https://api.github.com/repos/${{ env.DEST_OWNER }}/${{ env.DEST_REPO }}/contents/${{ env.TARGET_PATH }}"
+          code=$(curl -s -o resp.json -w "%{http_code}" -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$URL")
+          if [ "$code" = "200" ]; then
+            jq -r '.sha' resp.json > sha.txt
+            jq -r '.content' resp.json | tr -d '\n' | base64 -d > current.yaml || true
+          else
+            echo -n > current.yaml
+            echo -n > sha.txt
+          fi
+
+      - name: Append snippet
+        run: |
+          set -e
+          printf "\n" >> current.yaml
+          echo "${{ inputs.yaml_snippet_b64 }}" | base64 -d >> current.yaml
+
+      - name: Push updated YAML
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_GH_TOKEN }}
+        run: |
+          set -e
+          content_b64=$(base64 -w0 < current.yaml)
+          sha=$(cat sha.txt)
+          jq -n --arg msg "chore(learn): append debrief" \
+                --arg content "$content_b64" \
+                --arg name "${{ secrets.SYNC_BOT_NAME }}" \
+                --arg email "${{ secrets.SYNC_BOT_EMAIL }}" \
+                --arg sha "$sha" \
+                '{
+                  message: $msg,
+                  content: $content,
+                  branch: "main",
+                  committer: { name: $name, email: $email }
+                } + (if $sha != "" then {sha:$sha} else {} end)' > body.json
+
+          curl -s -f -X PUT \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d @body.json \
+            "https://api.github.com/repos/${{ env.DEST_OWNER }}/${{ env.DEST_REPO }}/contents/${{ env.TARGET_PATH }}"
+
+      - name: Release lock (ignore errors)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_GH_TOKEN }}
+        run: |
+          set -e
+          URL="https://api.github.com/repos/${{ env.DEST_OWNER }}/${{ env.DEST_REPO }}/contents/${{ env.LOCK_PATH }}"
+          code=$(curl -s -o resp.json -w "%{http_code}" \
+            -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$URL")
+          if [ "$code" = "200" ]; then
+            sha=$(jq -r '.sha' resp.json)
+            jq -n --arg msg "unlock LEARN_LOG by run ${{ github.run_id }}" \
+                  --arg sha "$sha" \
+                  --arg name "${{ secrets.SYNC_BOT_NAME }}" \
+                  --arg email "${{ secrets.SYNC_BOT_EMAIL }}" \
+                  '{message:$msg, sha:$sha, branch:"main", committer:{name:$name,email:$email}}' > body.json
+            curl -s -X DELETE -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+              -d @body.json "$URL" > /dev/null || true
+          fi

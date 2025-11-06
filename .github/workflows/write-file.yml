@@ -1,1 +1,76 @@
-﻿# write-file.yml sera collé ici
+﻿name: Write file to Vincent-Ops-and-Reports
+
+on:
+  workflow_dispatch:
+    inputs:
+      path:
+        description: "Chemin (relative) ex: reports/daily/2025-11-05_topN.md"
+        required: true
+        type: string
+      content_b64:
+        description: "Contenu base64 (UTF-8)"
+        required: true
+        type: string
+      message:
+        description: "Commit message"
+        required: false
+        default: "chore(report): daily TopN sync"
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  DEST_OWNER: minot-prod
+  DEST_REPO: Vincent-Ops-and-Reports
+
+jobs:
+  write:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assert required secrets
+        run: |
+          test -n "${{ secrets.SYNC_GH_TOKEN }}" || (echo "Missing SYNC_GH_TOKEN" && exit 1)
+          test -n "${{ secrets.SYNC_BOT_NAME }}" || (echo "Missing SYNC_BOT_NAME" && exit 1)
+          test -n "${{ secrets.SYNC_BOT_EMAIL }}" || (echo "Missing SYNC_BOT_EMAIL" && exit 1)
+
+      - name: Get existing file (if any)
+        id: getfile
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_GH_TOKEN }}
+        run: |
+          set -e
+          URL="https://api.github.com/repos/${{ env.DEST_OWNER }}/${{ env.DEST_REPO }}/contents/${{ inputs.path }}"
+          code=$(curl -s -o resp.json -w "%{http_code}" -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$URL")
+          if [ "$code" = "200" ]; then
+            sha=$(jq -r '.sha' resp.json)
+            echo "sha=$sha" >> $GITHUB_OUTPUT
+          else
+            echo "sha=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Put file
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_GH_TOKEN }}
+          BOT_NAME: ${{ secrets.SYNC_BOT_NAME }}
+          BOT_EMAIL: ${{ secrets.SYNC_BOT_EMAIL }}
+        run: |
+          set -e
+          jq -n --arg msg "${{ inputs.message }}" \
+                --arg content "${{ inputs.content_b64 }}" \
+                --arg path "${{ inputs.path }}" \
+                --arg sha "${{ steps.getfile.outputs.sha }}" \
+                --arg name "$BOT_NAME" \
+                --arg email "$BOT_EMAIL" \
+                '{
+                  message: $msg,
+                  content: $content,
+                  branch: "main",
+                  committer: { name: $name, email: $email }
+                } + (if $sha != "" then {sha:$sha} else {} end)' > body.json
+
+          curl -s -f -X PUT \
+            -H "Authorization: Bearer ${{ secrets.SYNC_GH_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            -d @body.json \
+            "https://api.github.com/repos/${{ env.DEST_OWNER }}/${{ env.DEST_REPO }}/contents/${{ inputs.path }}"
