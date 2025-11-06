@@ -44,6 +44,8 @@ jobs:
               -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
               -d "$body" \
               "https://api.github.com/repos/${{ env.DEST_OWNER }}/${{ env.DEST_REPO }}/contents/${{ env.LOCK_PATH }}")
+            echo "HTTP_CODE=$code"
+            cat resp.json || true
             if [ "$code" = "201" ]; then
               echo "lock_acquired=true" >> $GITHUB_OUTPUT
               exit 0
@@ -60,7 +62,11 @@ jobs:
         run: |
           set -e
           URL="https://api.github.com/repos/${{ env.DEST_OWNER }}/${{ env.DEST_REPO }}/contents/${{ env.TARGET_PATH }}"
-          code=$(curl -s -o resp.json -w "%{http_code}" -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$URL")
+          code=$(curl -s -o resp.json -w "%{http_code}" \
+                 -H "Authorization: Bearer $GH_TOKEN" \
+                 -H "Accept: application/vnd.github+json" "$URL")
+          echo "HTTP_CODE=$code"
+          cat resp.json || true
           if [ "$code" = "200" ]; then
             jq -r '.sha' resp.json > sha.txt
             jq -r '.content' resp.json | tr -d '\n' | base64 -d > current.yaml || true
@@ -94,11 +100,14 @@ jobs:
                   committer: { name: $name, email: $email }
                 } + (if $sha != "" then {sha:$sha} else {} end)' > body.json
 
-          curl -s -f -X PUT \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            -d @body.json \
-            "https://api.github.com/repos/${{ env.DEST_OWNER }}/${{ env.DEST_REPO }}/contents/${{ env.TARGET_PATH }}"
+          URL="https://api.github.com/repos/${{ env.DEST_OWNER }}/${{ env.DEST_REPO }}/contents/${{ env.TARGET_PATH }}"
+          code=$(curl -s -o resp.json -w "%{http_code}" -X PUT \
+                 -H "Authorization: Bearer $GH_TOKEN" \
+                 -H "Accept: application/vnd.github+json" \
+                 -d @body.json "$URL")
+          echo "HTTP_CODE=$code"
+          cat resp.json || true
+          test "$code" -ge 200 -a "$code" -lt 300
 
       - name: Release lock (ignore errors)
         if: always()
@@ -108,7 +117,8 @@ jobs:
           set -e
           URL="https://api.github.com/repos/${{ env.DEST_OWNER }}/${{ env.DEST_REPO }}/contents/${{ env.LOCK_PATH }}"
           code=$(curl -s -o resp.json -w "%{http_code}" \
-            -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$URL")
+                 -H "Authorization: Bearer $GH_TOKEN" \
+                 -H "Accept: application/vnd.github+json" "$URL")
           if [ "$code" = "200" ]; then
             sha=$(jq -r '.sha' resp.json)
             jq -n --arg msg "unlock LEARN_LOG by run ${{ github.run_id }}" \
@@ -116,6 +126,10 @@ jobs:
                   --arg name "${{ secrets.SYNC_BOT_NAME }}" \
                   --arg email "${{ secrets.SYNC_BOT_EMAIL }}" \
                   '{message:$msg, sha:$sha, branch:"main", committer:{name:$name,email:$email}}' > body.json
-            curl -s -X DELETE -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
-              -d @body.json "$URL" > /dev/null || true
+            code=$(curl -s -o resp.json -w "%{http_code}" -X DELETE \
+                   -H "Authorization: Bearer $GH_TOKEN" \
+                   -H "Accept: application/vnd.github+json" \
+                   -d @body.json "$URL")
+            echo "HTTP_CODE=$code"
+            cat resp.json || true
           fi

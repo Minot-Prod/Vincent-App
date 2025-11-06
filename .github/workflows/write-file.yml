@@ -41,7 +41,11 @@ jobs:
         run: |
           set -e
           URL="https://api.github.com/repos/${{ env.DEST_OWNER }}/${{ env.DEST_REPO }}/contents/${{ inputs.path }}"
-          code=$(curl -s -o resp.json -w "%{http_code}" -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$URL")
+          code=$(curl -s -o resp.json -w "%{http_code}" \
+                 -H "Authorization: Bearer $GH_TOKEN" \
+                 -H "Accept: application/vnd.github+json" "$URL")
+          echo "HTTP_CODE=$code"
+          cat resp.json || true
           if [ "$code" = "200" ]; then
             sha=$(jq -r '.sha' resp.json)
             echo "sha=$sha" >> $GITHUB_OUTPUT
@@ -58,7 +62,6 @@ jobs:
           set -e
           jq -n --arg msg "${{ inputs.message }}" \
                 --arg content "${{ inputs.content_b64 }}" \
-                --arg path "${{ inputs.path }}" \
                 --arg sha "${{ steps.getfile.outputs.sha }}" \
                 --arg name "$BOT_NAME" \
                 --arg email "$BOT_EMAIL" \
@@ -69,8 +72,11 @@ jobs:
                   committer: { name: $name, email: $email }
                 } + (if $sha != "" then {sha:$sha} else {} end)' > body.json
 
-          curl -s -f -X PUT \
-            -H "Authorization: Bearer ${{ secrets.SYNC_GH_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            -d @body.json \
-            "https://api.github.com/repos/${{ env.DEST_OWNER }}/${{ env.DEST_REPO }}/contents/${{ inputs.path }}"
+          URL="https://api.github.com/repos/${{ env.DEST_OWNER }}/${{ env.DEST_REPO }}/contents/${{ inputs.path }}"
+          code=$(curl -s -o resp.json -w "%{http_code}" -X PUT \
+                 -H "Authorization: Bearer $GH_TOKEN" \
+                 -H "Accept: application/vnd.github+json" \
+                 -d @body.json "$URL")
+          echo "HTTP_CODE=$code"
+          cat resp.json || true
+          test "$code" -ge 200 -a "$code" -lt 300
